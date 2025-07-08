@@ -1,6 +1,6 @@
 streamlit
 pandas
 sentence-transformers
-language-tool-python
 nltk
 bcrypt
+textblob

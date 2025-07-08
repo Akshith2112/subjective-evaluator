@@ -3,7 +3,6 @@ import sqlite3
 import bcrypt
 import pandas as pd
 from sentence_transformers import SentenceTransformer, util
-import language_tool_python
 import nltk
 import string
 from nltk.corpus import wordnet, stopwords
@@ -15,6 +14,22 @@ import logging
 from functools import lru_cache
 import csv
 import datetime as dt
+from textblob import TextBlob
+
+# Robust NLTK data download (prevents LookupError on Streamlit Cloud)
+def download_nltk_data():
+    resources = [
+        ('tokenizers/punkt', 'punkt'),
+        ('corpora/stopwords', 'stopwords'),
+        ('corpora/wordnet', 'wordnet')
+    ]
+    for path, name in resources:
+        try:
+            nltk.data.find(path)
+        except LookupError:
+            nltk.download(name)
+
+download_nltk_data()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -24,87 +39,71 @@ logger = logging.getLogger(__name__)
 st.set_page_config(page_title="Subjective Answer Evaluator", layout="wide", initial_sidebar_state="auto")
 
 # NLTK downloads
-nltk.download('punkt', quiet=True)
-nltk.download('stopwords', quiet=True)
-nltk.download('wordnet', quiet=True)
+nltk.download('punkt', force=True)
+nltk.download('stopwords', force=True)
+nltk.download('wordnet', force=True)
 
 # Custom CSS for Dark Mode
 st.markdown("""
 <style>
-@import url('https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css');
-@import url('https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css');
-
 body, .stApp {
-    background-color: #0f172a !important;
-    color: #e2e8f0 !important;
+    background-color: var(--background-color) !important;
+    color: var(--text-color) !important;
     font-family: 'Inter', sans-serif;
 }
-
 h1, h2, h3 {
-    color: #e2e8f0 !important;
+    color: var(--text-color) !important;
     font-weight: 700 !important;
     margin-bottom: 1rem !important;
 }
-
 .stTextInput input, .stTextArea textarea {
-    border: 2px solid #3b82f6 !important;
+    border: 2px solid var(--primary-color) !important;
     border-radius: 0.5rem !important;
     padding: 0.75rem !important;
-    background-color: #1e293b !important;
-    color: #e2e8f0 !important;
+    background-color: var(--secondary-background-color) !important;
+    color: var(--text-color) !important;
     transition: all 0.2s ease-in-out !important;
 }
-
 .stTextInput input:focus, .stTextArea textarea:focus {
-    border-color: #60a5fa !important;
-    background-color: #1e293b !important;
-    box-shadow: 0 0 10px rgba(96, 165, 250, 0.3) !important;
+    border-color: var(--primary-color) !important;
+    background-color: var(--secondary-background-color) !important;
+    box-shadow: 0 0 10px var(--primary-color) !important;
 }
-
 .stSelectbox div[data-baseweb="select"] {
-    background-color: #1e293b !important;
-    color: #e2e8f0 !important;
+    background-color: var(--secondary-background-color) !important;
+    color: var(--text-color) !important;
     border-radius: 0.5rem !important;
 }
-
 .stButton button {
-    background-color: #3b82f6 !important;
-    color: #ffffff !important;
+    background-color: var(--primary-color) !important;
+    color: var(--text-color) !important;
     font-weight: 600 !important;
     border-radius: 0.5rem !important;
     padding: 0.75rem 1.5rem !important;
     transition: all 0.2s ease-in-out !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
 }
-
 .stButton button:hover {
-    background-color: #2563eb !important;
+    background-color: var(--primary-color) !important;
+    opacity: 0.92 !important;
     transform: scale(1.05) !important;
 }
-
-.stExpander {
-    background-color: #1e293b !important;
-    border: 1px solid #3b82f6 !important;
+.stExpander, .stDataFrame {
+    background-color: var(--secondary-background-color) !important;
+    border: 1px solid var(--primary-color) !important;
     border-radius: 0.5rem !important;
 }
-
-.stDataFrame {
-    background-color: #1e293b !important;
-    border: 1px solid #3b82f6 !important;
-    border-radius: 0.5rem !important;
-}
-
 .stSidebar {
-    background-color: #0f172a !important;
-    color: #e2e8f0 !important;
+    background-color: var(--background-color) !important;
+    color: var(--text-color) !important;
 }
-
 .stSidebar .stButton button {
-    background-color: #3b82f6 !important;
-    color: #ffffff !important;
+    background-color: var(--primary-color) !important;
+    color: var(--text-color) !important;
 }
-
 .stSidebar .stButton button:hover {
-    background-color: #2563eb !important;
+    background-color: var(--primary-color) !important;
+    opacity: 0.92 !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -245,16 +244,12 @@ def cleanup_orphaned_records():
 def load_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
 
-@st.cache_resource
-def load_language_tool():
-    return language_tool_python.LanguageTool('en-US')
-
 # Preprocessing and evaluation functions
 def preprocess(text):
     if not isinstance(text, str):
         return ""
     text = text.lower().translate(str.maketrans("", "", string.punctuation))
-    tokens = nltk.word_tokenize(text)
+    tokens = nltk.word_tokenize(text, language='english')
     tokens = [word for word in tokens if word not in stopwords.words('english')]
     return " ".join(tokens)
 
@@ -288,21 +283,22 @@ def score_similarity(similarity):
 def grammar_score(text):
     if not isinstance(text, str) or not text.strip():
         return 0, "Empty answer", []
-    tool = load_language_tool()
+    blob = TextBlob(text)
+    corrected = str(blob.correct())
+    errors = sum(1 for a, b in zip(text.split(), corrected.split()) if a != b)
     words = len(text.split())
-    matches = tool.check(text)
-    errors = len(matches)
     error_rate = min(errors / words, 0.5) if words > 0 else 0.5
+    corrections = [{"original": a, "corrected": b} for a, b in zip(text.split(), corrected.split()) if a != b]
     if errors == 0:
-        return 10, "Perfect grammar", matches
+        return 10, "Perfect grammar", []
     elif error_rate < 0.02:
-        return 10, "Excellent grammar", matches
+        return 10, "Excellent grammar", corrections
     elif error_rate < 0.05:
-        return 8, "Minor grammatical issues", matches
+        return 8, "Minor grammatical issues", corrections
     elif error_rate < 0.1:
-        return 6, "Noticeable errors", matches
+        return 6, "Noticeable errors", corrections
     else:
-        return 4, "Poor grammar", matches
+        return 4, "Poor grammar", corrections
 
 def length_penalty(text):
     if not isinstance(text, str) or not text.strip():
@@ -470,7 +466,7 @@ def evaluate_answer(model_answer, student_answer, keywords, subject):
         'Similarity (%)': similarity, 'Confidence (%)': confidence, 'Similarity Score': sim_score, 'Similarity Feedback': sim_feedback,
         'Grammar Score': grammar_points, 'Grammar Feedback': grammar_feedback, 'Keyword Score': keyword_points, 'Keyword Feedback': keyword_feedback,
         'Matched Keywords': ', '.join(matched_keywords) or 'None', 'Length Penalty': length_factor, 'Length Feedback': length_feedback,
-        'Final Score': final_score, 'Grammar Matches': [{'ruleId': m.ruleId, 'message': m.message, 'context': m.context} for m in grammar_matches],
+        'Final Score': final_score, 'Grammar Matches': grammar_matches,
         'Suggestions': ' '.join(suggestions)
     }
 
@@ -859,9 +855,9 @@ else:
                                             st.write(f"<i class='fas fa-brain'></i> <b>Semantic Similarity:</b> {result['Similarity (%)']:.1f}% → Score: {result['Similarity Score']}/10 → <i>{result['Similarity Feedback']}</i>", unsafe_allow_html=True)
                                             st.write(f"<i class='fas fa-pencil-alt'></i> <b>Grammar Score:</b> {result['Grammar Score']}/10 → <i>{result['Grammar Feedback']}</i>", unsafe_allow_html=True)
                                             if result['Grammar Matches']:
-                                                st.markdown("#### <i class='fas fa-exclamation-circle'></i> Grammar Issues (Top 5)", unsafe_allow_html=True)
+                                                st.markdown("#### Grammar Corrections (Top 5)")
                                                 for match in result['Grammar Matches'][:5]:
-                                                    st.write(f"- {match['ruleId']}: {match['message']} (at: {match['context']})")
+                                                    st.write(f"- {match['original']} → {match['corrected']}")
                                             st.write(f"<i class='fas fa-key'></i> <b>Keyword Match Score:</b> {result['Keyword Score']}/10 → <i>{result['Keyword Feedback']}</i>", unsafe_allow_html=True)
                                             st.write(f"<i class='fas fa-tags'></i> <b>Matched Keywords:</b> {result['Matched Keywords']}", unsafe_allow_html=True)
                                             st.write(f"<i class='fas fa-ruler'></i> <b>Length Penalty:</b> <i>{result['Length Feedback']}</i>", unsafe_allow_html=True)
@@ -964,7 +960,7 @@ else:
                                             if result['Grammar Matches']:
                                                 st.markdown("#### <i class='fas fa-exclamation-circle'></i> Grammar Issues (Top 5)", unsafe_allow_html=True)
                                                 for match in result['Grammar Matches'][:5]:
-                                                    st.write(f"- {match['ruleId']}: {match['message']} (at: {match['context']})")
+                                                    st.write(f"- {match['original']} → {match['corrected']}")
                                             st.write(f"<i class='fas fa-key'></i> <b>Keyword Match Score:</b> {result['Keyword Score']}/10 → <i>{result['Keyword Feedback']}</i>", unsafe_allow_html=True)
                                             st.write(f"<i class='fas fa-tags'></i> <b>Matched Keywords:</b> {result['Matched Keywords']}", unsafe_allow_html=True)
                                             st.write(f"<i class='fas fa-ruler'></i> <b>Length Penalty:</b> <i>{result['Length Feedback']}</i>", unsafe_allow_html=True)
@@ -1194,9 +1190,9 @@ else:
                         st.write(f"**Similarity Score:** {result.get('Similarity Score', 0)}/10 ({result.get('Similarity (%)', 0.0):.1f}%) - {result.get('Similarity Feedback', '')}")
                         st.write(f"**Grammar Score:** {result.get('Grammar Score', 0)}/10 - {result.get('Grammar Feedback', '')}")
                         if result.get('Grammar Matches'):
-                            st.markdown("#### Grammar Issues (Top 5)")
+                            st.markdown("#### Grammar Corrections (Top 5)")
                             for match in result.get('Grammar Matches', [])[:5]:
-                                st.write(f"- {match['ruleId']}: {match['message']} (at: {match['context']})")
+                                st.write(f"- {match['original']} → {match['corrected']}")
                         st.write(f"**Keyword Score:** {result.get('Keyword Score', 0)}/10 - {result.get('Keyword Feedback', '')}")
                         st.write(f"**Matched Keywords:** {result.get('Matched Keywords', 'None')}")
                         st.write(f"**Final Score:** {result.get('Final Score', 0.0)}/10")
